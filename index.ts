@@ -351,12 +351,12 @@ export default function (pi: ExtensionAPI): void {
   });
 
   // ---------------------------------------------------------------------------
-  // tool_call — swap placeholders back to real values before ANY tool executes
+  // tool_call — swap placeholders back ONLY before bash execution
   //
-  // Covers:
-  //   bash   — command strings containing placeholders
-  //   write  — file content containing placeholders
-  //   edit   — replacement text containing placeholders
+  // write/edit intentionally NOT unmasked — the model writes placeholders
+  // to files. If the model later reads them back, the placeholder is
+  // preserved (not re-masked). Only at the bash boundary (API calls,
+  // curl, etc.) are placeholders resolved to real values.
   // ---------------------------------------------------------------------------
   pi.on("tool_call", async (event, _ctx) => {
     if (store.getStats().mappingCount === 0) return {};
@@ -364,22 +364,6 @@ export default function (pi: ExtensionAPI): void {
     if (isToolCallEventType("bash", event)) {
       // event.input.command is mutable — changes affect actual execution
       event.input.command = store.unmask(event.input.command);
-      return {};
-    }
-
-    if (isToolCallEventType("write", event)) {
-      // event.input.content is the file content to be written
-      event.input.content = store.unmask(event.input.content);
-      return {};
-    }
-
-    if (isToolCallEventType("edit", event)) {
-      // event.input.edits contains oldText/newText pairs
-      if (Array.isArray(event.input.edits)) {
-        for (const edit of event.input.edits) {
-          edit.newText = store.unmask(edit.newText);
-        }
-      }
       return {};
     }
 
@@ -404,6 +388,49 @@ export default function (pi: ExtensionAPI): void {
     }
 
     return { content: newContent };
+  });
+
+  // ---------------------------------------------------------------------------
+  // user_bash — intercept ! / !! command output before it enters context
+  // ---------------------------------------------------------------------------
+  pi.on("user_bash", async (event, ctx) => {
+    const { createLocalBashOperations } = await import("@earendil-works/pi-coding-agent");
+    const local = createLocalBashOperations();
+
+    return {
+      operations: {
+        exec: async (command: string, cwd: string, options?: Record<string, unknown>) => {
+          const result = await local.exec(command, cwd, options);
+          // Only mask when output goes to LLM context (!, not !!)
+          if (!event.excludeFromContext && result.output) {
+            const before = store.getStats().mappingCount;
+            result.output = store.mask(result.output);
+            const newCount = store.getStats().mappingCount - before;
+            if (newCount > 0 && ctx.hasUI) {
+              ctx.ui.notify(`🔒 Masked ${newCount} secret(s) from ! command output`, "info");
+            }
+          }
+          return result;
+        },
+      },
+    };
+  });
+
+  // ---------------------------------------------------------------------------
+  // before_provider_request — last defense before the payload leaves
+  // ---------------------------------------------------------------------------
+  pi.on("before_provider_request", (event, _ctx) => {
+    try {
+      // Deep-scan the entire serialized payload for any secrets that
+      // might have bypassed earlier handlers
+      const json = JSON.stringify(event.payload);
+      const masked = store.mask(json);
+      if (masked === json || masked.length === 0) return;
+      return JSON.parse(masked);
+    } catch {
+      // If serialization fails, let the original payload through
+      // rather than breaking the provider call
+    }
   });
 
   // ---------------------------------------------------------------------------

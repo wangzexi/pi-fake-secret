@@ -350,6 +350,74 @@ console.log('\n📦 AWS key format');
   assert(p !== 'AKIAIOSFODNN7EXAMPLE', 'different value');
 }
 
+// 13. Re-mask doesn't create stale mappings (simulating ! command output)
+console.log('\n📦 No stale mappings on re-mask');
+{
+  const s = new SecretStore();
+  // Simulate: user runs `!cat file` which outputs a secret
+  const bashOutput = 'KEY=sk-proj-AbCdEfGhIjKlMnOp1234567890';
+  const maskedOnce = s.mask(bashOutput);
+  const placeholder = maskedOnce.match(/sk-proj-[a-zA-Z0-9-]+/)[0];
+  assertEqual(s.getStats().mappingCount, 1, 'one mapping after first mask');
+
+  // Simulate: the same bash output appears again (e.g., in context history)
+  const maskedTwice = s.mask(bashOutput);
+  // The same placeholder should be used — same real → same placeholder
+  assert(maskedTwice.includes(placeholder),
+    'same placeholder used on re-mask of same secret');
+  assertEqual(s.getStats().mappingCount, 1,
+    'no extra mappings on re-mask');
+}
+
+// 14. Round-trip with second occurrence
+console.log('\n📦 Bash ! command scenario: output → context → LLM');
+{
+  const s = new SecretStore();
+  const fileContent = 'DATABASE_URL=postgres://user:sk-proj-DB-SECRET-888877776655@localhost/db';
+
+  // Phase 1: !cat file → output goes to terminal AND context (masked)
+  const masked = s.mask(fileContent);
+  assert(!masked.includes('sk-proj-DB-SECRET-888877776655'), 'secret masked from ! output');
+  assert(masked.includes('postgres://user:'), 'URL structure preserved');
+
+  // Extract placeholder
+  const placeholder = masked.match(/sk-proj-[a-zA-Z0-9-]+/)[0];
+
+  // Phase 2: masked content is in context history
+  // context handler calls mask() again
+  const reMasked = s.mask(masked);
+  assert(reMasked.includes(placeholder),
+    'placeholder preserved in re-mask (not double-masked)');
+
+  // Phase 3: unmask should still work
+  const unmasked = s.unmask(placeholder);
+  assertEqual(unmasked, 'sk-proj-DB-SECRET-888877776655',
+    'placeholder can still be resolved');
+}
+
+// 15. JSON deep-scan (simulating before_provider_request)
+console.log('\n📦 JSON payload scan (before_provider_request)');
+{
+  const s = new SecretStore();
+  const payload = {
+    model: 'gpt-4',
+    messages: [
+      { role: 'user', content: 'my key is sk-proj-JSON-SCENARIO-TEST-1122334455' }
+    ]
+  };
+  const json = JSON.stringify(payload);
+  const masked = s.mask(json);
+  assert(!masked.includes('sk-proj-JSON-SCENARIO-TEST-1122334455'),
+    'secret masked in JSON string');
+  assert(masked.includes('my key is'), 'text structure preserved');
+
+  // Should be parseable back
+  const parsed = JSON.parse(masked);
+  assertEqual(parsed.messages[0].role, 'user', 'JSON structure valid after mask');
+  assert(!parsed.messages[0].content.includes('sk-proj-JSON-SCENARIO-TEST-1122334455'),
+    'parsed content is masked');
+}
+
 // ---------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------
