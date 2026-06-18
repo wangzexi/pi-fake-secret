@@ -1,7 +1,7 @@
 {
   "name": "pi-fake-secret",
   "version": "0.1.0",
-  "description": "Pi 扩展：给模型造假的密钥，执行时再换成真的。模型永远看不到真实值。",
+  "description": "Pi 扩展：对模型造假密钥，执行时换真的。",
   "type": "module",
   "main": "index.ts",
   "files": [
