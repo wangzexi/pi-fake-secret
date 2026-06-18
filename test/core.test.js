@@ -395,7 +395,74 @@ console.log('\n📦 Bash ! command scenario: output → context → LLM');
     'placeholder can still be resolved');
 }
 
-// 15. JSON deep-scan (simulating before_provider_request)
+// 15. Write tool unmask
+console.log('\n📦 Write tool unmask (placeholder → real before file write)');
+{
+  const s = new SecretStore();
+  const placeholder = s.register('sk-proj-WRITE-TEST-REAL-KEY-001122334455');
+
+  // Simulate: model writes placeholder content to file
+  const modelContent = `DATABASE_URL=postgres://user:${placeholder}@localhost/db\nKEY=${placeholder}`;
+  const unmasked = s.unmask(modelContent);
+  assert(!unmasked.includes(placeholder),
+    'placeholder replaced before write');
+  assert(unmasked.includes('sk-proj-WRITE-TEST-REAL-KEY-001122334455'),
+    'real value restored in write content');
+  assertEqual(
+    unmasked.match(/sk-proj-[a-zA-Z0-9-]+/g).length, 2,
+    'both occurrences restored'
+  );
+}
+
+// 16. Edit tool unmask
+console.log('\n📦 Edit tool unmask (placeholder → real before file edit)');
+{
+  const s = new SecretStore();
+  const placeholder = s.register('sk-proj-EDIT-REAL-KEY-9988776655443322');
+
+  // Simulate: model edits a file, replacing old value with placeholder
+  const edits = [
+    { oldText: 'old_key=xxx', newText: `new_key=${placeholder}` }
+  ];
+  for (const edit of edits) {
+    edit.newText = s.unmask(edit.newText);
+  }
+  assert(!edits[0].newText.includes(placeholder),
+    'placeholder replaced in edit.newText');
+  assert(edits[0].newText.includes('sk-proj-EDIT-REAL-KEY-9988776655443322'),
+    'real value restored in edit');
+}
+
+// 17. Write-read round trip (model writes placeholder → reads back → sees placeholder)
+console.log('\n📦 Write → read round-trip (placeholder preserved)');
+{
+  const s = new SecretStore();
+  const real = 'ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij';
+  const placeholder = s.register(real);
+
+  // Phase 1: model writes file (should unmask to real)
+  const writeContent = `GITHUB_TOKEN=${placeholder}`;
+  const diskContent = s.unmask(writeContent);
+  assert(diskContent.includes('ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij'),
+    'file on disk has real value');
+
+  // Phase 2: model reads the file back
+  // tool_result calls mask() on the read content
+  const readResult = s.mask(diskContent);
+  assert(readResult.includes(placeholder),
+    'model sees placeholder when reading back');
+
+  // Phase 3: model uses the placeholder in bash
+  const bashCommand = `curl -H "Authorization: token ${placeholder}" https://api.github.com/user`;
+  const executedCommand = s.unmask(bashCommand);
+  assert(executedCommand.includes('ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij'),
+    'bash command gets real value at execution time');
+  assertEqual(s.getStats().mappingCount, 1,
+    'single mapping throughout the cycle');
+
+}
+
+// 18. JSON deep-scan (simulating before_provider_request)
 console.log('\n📦 JSON payload scan (before_provider_request)');
 {
   const s = new SecretStore();

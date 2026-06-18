@@ -351,19 +351,35 @@ export default function (pi: ExtensionAPI): void {
   });
 
   // ---------------------------------------------------------------------------
-  // tool_call — swap placeholders back ONLY before bash execution
+  // tool_call — swap placeholders back to real values before tool executes
   //
-  // write/edit intentionally NOT unmasked — the model writes placeholders
-  // to files. If the model later reads them back, the placeholder is
-  // preserved (not re-masked). Only at the bash boundary (API calls,
-  // curl, etc.) are placeholders resolved to real values.
+  // bash   — command strings containing placeholders
+  // write  — file content containing placeholders
+  // edit   — replacement text containing placeholders
+  //
+  // The model only ever sees placeholders. At execution time, the harness
+  // resolves them to real values so that files on disk contain valid
+  // secrets and bash commands authenticate correctly.
   // ---------------------------------------------------------------------------
   pi.on("tool_call", async (event, _ctx) => {
     if (store.getStats().mappingCount === 0) return {};
 
     if (isToolCallEventType("bash", event)) {
-      // event.input.command is mutable — changes affect actual execution
       event.input.command = store.unmask(event.input.command);
+      return {};
+    }
+
+    if (isToolCallEventType("write", event)) {
+      event.input.content = store.unmask(event.input.content);
+      return {};
+    }
+
+    if (isToolCallEventType("edit", event)) {
+      if (Array.isArray(event.input.edits)) {
+        for (const edit of event.input.edits) {
+          edit.newText = store.unmask(edit.newText);
+        }
+      }
       return {};
     }
 
