@@ -12,32 +12,45 @@
  * a mapping table and does the swap at the bridge boundary.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/** Maximum text length to scan (1 MB). Larger content passes through unmasked. */
-const MAX_SCAN_SIZE = 1_048_576;
-
-
+/**
+ * Maximum single regex scan window.
+ * Large text is scanned in overlapping windows instead of being passed through.
+ */
+export const MAX_SCAN_SIZE = 1_048_576;
+const SCAN_OVERLAP = 8192;
 
 // =============================================================================
 // Types
 // =============================================================================
 
-interface SecretPattern {
+export interface SecretPattern {
   /** Human-readable name for display/logging. */
   name: string;
   /** Global regex matching the secret format. */
   regex: RegExp;
 }
 
-interface SecretMapping {
+export interface SecretMapping {
   real: string;
   fake: string;
+}
+
+interface ExtensionAPI {
+  on(name: string, handler: (event: any, ctx: any) => unknown | Promise<unknown>): void;
+  registerCommand(
+    name: string,
+    options: {
+      description?: string;
+      getArgumentCompletions?: (prefix: string) => Array<{ value: string; label?: string }> | null;
+      handler: (args: string | undefined, ctx: any) => unknown | Promise<unknown>;
+    },
+  ): void;
 }
 
 // =============================================================================
@@ -47,7 +60,7 @@ const TEST = "test";
 // Default detection patterns
 // =============================================================================
 
-const DEFAULT_PATTERNS: SecretPattern[] = [
+export const DEFAULT_PATTERNS: SecretPattern[] = [
   { name: "openai-api-key",       regex: /sk-[a-zA-Z0-9-]{20,}/g },
   { name: "anthropic-api-key",    regex: /sk-ant-[a-zA-Z0-9-]{20,}/g },
   { name: "github-pat-v1",        regex: /(?:ghp|gho|ghs|ghu)_[a-zA-Z0-9]{36,}/g },
@@ -68,16 +81,13 @@ const DEFAULT_PATTERNS: SecretPattern[] = [
 // SecretStore — maintains the bidirectional mapping table
 // =============================================================================
 
-class SecretStore {
+export class SecretStore {
   /** real secret value → fake */
   private realToFake = new Map<string, string>();
   /** fake → real secret value */
   private fakeToReal = new Map<string, string>();
   /** active detection patterns */
   private patterns: SecretPattern[] = [];
-  /** accumulated changes since last beginTracking() call */
-  private pendingChanges: Array<{real:string;fake:string;type:'mask'|'unmask'}> = [];
-  private tracking = false;
 
   // ---------------------------------------------------------------------------
   // Configuration
@@ -89,24 +99,6 @@ class SecretStore {
 
   getPatterns(): SecretPattern[] {
     return this.patterns;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Change tracking (for notifications)
-  // ---------------------------------------------------------------------------
-
-  /** Start accumulating changes. */
-  beginTracking(): void {
-    this.pendingChanges = [];
-    this.tracking = true;
-  }
-
-  /** Collect and clear accumulated changes. */
-  flushChanges(): Array<{real:string;fake:string;type:'mask'|'unmask'}> {
-    this.tracking = false;
-    const c = this.pendingChanges;
-    this.pendingChanges = [];
-    return c;
   }
 
   // ---------------------------------------------------------------------------
@@ -122,11 +114,11 @@ class SecretStore {
     if (existing) return existing;
 
     const fake = this.generateFake(real);
+    if (this.fakeToReal.has(fake) && this.fakeToReal.get(fake) !== real) {
+      throw new Error("pi-fake-secret generated a duplicate fake secret");
+    }
     this.realToFake.set(real, fake);
     this.fakeToReal.set(fake, real);
-    if (this.tracking) {
-      this.pendingChanges.push({ real, fake, type: 'mask' });
-    }
     return fake;
   }
 
@@ -147,7 +139,11 @@ class SecretStore {
    * fake secrets. Longer matches are replaced first to avoid substring issues.
    */
   mask(text: string): string {
-    if (!text || text.length > MAX_SCAN_SIZE) return text;
+    if (!text) return text;
+
+    if (text.length > MAX_SCAN_SIZE) {
+      return this.maskLargeText(text);
+    }
 
     // First pass: collect all unique matches from the ORIGINAL text
     const matches = new Map<string, string>(); // real → fake
@@ -180,6 +176,41 @@ class SecretStore {
     return result;
   }
 
+  private maskLargeText(text: string): string {
+    const matches = new Map<string, string>();
+    const seen = new Set<string>();
+    const step = MAX_SCAN_SIZE - SCAN_OVERLAP;
+
+    for (let start = 0; start < text.length; start += step) {
+      const end = Math.min(text.length, start + MAX_SCAN_SIZE);
+      const chunk = text.slice(start, end);
+
+      for (const { regex } of this.patterns) {
+        regex.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = regex.exec(chunk)) !== null) {
+          const real = m[0];
+          if (this.fakeToReal.has(real)) continue;
+          if (!seen.has(real) && real.length >= 8) {
+            seen.add(real);
+            matches.set(real, this.register(real));
+          }
+        }
+      }
+
+      if (end === text.length) break;
+    }
+
+    if (matches.size === 0) return text;
+
+    let result = text;
+    const sorted = [...matches.entries()].sort((a, b) => b[0].length - a[0].length);
+    for (const [real, fake] of sorted) {
+      result = result.replaceAll(real, fake);
+    }
+    return result;
+  }
+
   // ---------------------------------------------------------------------------
   // Transform: unmask  (replace known fake secrets back to real values)
   // ---------------------------------------------------------------------------
@@ -196,9 +227,6 @@ class SecretStore {
       .sort((a, b) => b[0].length - a[0].length);
     for (const [fake, real] of sorted) {
       if (result.includes(fake)) {
-        if (this.tracking) {
-          this.pendingChanges.push({ real, fake, type: 'unmask' });
-        }
         result = result.replaceAll(fake, real);
       }
     }
@@ -231,18 +259,6 @@ class SecretStore {
       }));
   }
 
-  /**
-   * Format a single change for notification display.
-   * Fake:    🎭 sk-p…2504 → sk-proj-XyZAbCd...
-   * Restore: 🎭 sk-proj-XyZAbCd... → sk-p…2504
-   */
-  formatChange(c: {real:string;fake:string;type:'mask'|'unmask'}): string {
-    if (c.type === 'mask') {
-      return `🎭 造假: ${this.hint(c.real)} → ${c.fake}`;
-    }
-    return `🎭 还原: ${c.fake} → ${this.hint(c.real)}`;
-  }
-
   // ---------------------------------------------------------------------------
   // Fake secret generation
   // ---------------------------------------------------------------------------
@@ -250,17 +266,18 @@ class SecretStore {
   /**
    * Generate a fake secret that looks indistinguishable from the original.
    *
-   * Strategy: keep the first "prefix segment" (e.g. sk-, ghp_, AKIA) unchanged
-   * so the fake looks like the same TYPE of credential. Randomize the
-   * variable "body" part character by character within the same case class
-   * (lowercase, uppercase, digit).
+   * Strategy: keep the structural prefix (e.g. sk-, ghp_, AKIA) unchanged so
+   * the fake looks like the same type of credential. The body is derived from
+   * a SHA-256 stream, not Math.random(), so the same real secret always maps
+   * to the same fake. That keeps model-side history stable for provider KV
+   * caches across extension reloads and session restores.
    *
    * Examples:
    *   sk-proj-AbCdEfGhIjKlMnOp1234567890
    *     → sk-proj-XyZABcDeFgHiJkLmN9876543210
    *
-   *   ghp_AbCdEfGhIjKlMnOp1234567890AbCdEfGhIjKlMnOp1234
-   *     → ghp_XyZABcDeFgHiJkLmN9876543210XyZABcDeFgHiJkLmN9876
+   *   ghp_<token-body>
+   *     → ghp_<deterministic-fake-body>
    */
   private generateFake(real: string): string {
     // Find the boundary between the structural prefix and the random body:
@@ -282,23 +299,28 @@ class SecretStore {
     const prefix = real.slice(0, splitAt);
     const body = real.slice(splitAt);
 
-    // Randomize the body: same length, same character class per position
-    const randomizedBody = body.split("").map((ch) => {
+    const bytes = this.hashBytes(real);
+    let byteIndex = 0;
+    const nextByte = () => {
+      const value = bytes[byteIndex % bytes.length];
+      byteIndex++;
+      return value;
+    };
+
+    const fakeBody = body.split("").map((ch) => {
       if (ch >= "a" && ch <= "z")
-        return String.fromCharCode(97 + Math.floor(Math.random() * 26));
+        return String.fromCharCode(97 + (nextByte() % 26));
       if (ch >= "A" && ch <= "Z")
-        return String.fromCharCode(65 + Math.floor(Math.random() * 26));
+        return String.fromCharCode(65 + (nextByte() % 26));
       if (ch >= "0" && ch <= "9")
-        return String.fromCharCode(48 + Math.floor(Math.random() * 10));
+        return String.fromCharCode(48 + (nextByte() % 10));
       return ch;
     }).join("");
 
-    const result = prefix + randomizedBody;
+    const result = prefix + fakeBody;
 
-    // Fallback: if by extreme luck the result equals the original, flip
-    // one character in the body
-    if (result === real && randomizedBody.length > 0) {
-      const idx = Math.floor(Math.random() * randomizedBody.length);
+    if (result === real && fakeBody.length > 0) {
+      const idx = bytes[0] % fakeBody.length;
       const ch = result[splitAt + idx];
       let replacement: string;
       if (ch >= "a" && ch <= "z")
@@ -311,6 +333,22 @@ class SecretStore {
     }
 
     return result;
+  }
+
+  private hashBytes(real: string): Uint8Array {
+    const chunks: number[] = [];
+    let counter = 0;
+    while (chunks.length < real.length) {
+      const digest = createHash("sha256")
+        .update("pi-fake-secret:")
+        .update(real)
+        .update(":")
+        .update(String(counter))
+        .digest();
+      chunks.push(...digest);
+      counter++;
+    }
+    return Uint8Array.from(chunks);
   }
 
 
@@ -341,14 +379,19 @@ function isTextBlock(b: unknown): b is TextContentBlock {
 function transformTextBlocks(
   blocks: unknown[],
   fn: (text: string) => string,
-): unknown[] {
-  return blocks.map((b) => {
+): { blocks: unknown[]; changed: boolean } {
+  let changed = false;
+  const transformed = blocks.map((b) => {
     if (isTextBlock(b)) {
       const newText = fn(b.text);
-      return newText !== b.text ? { ...b, text: newText } : b;
+      if (newText !== b.text) {
+        changed = true;
+        return { ...b, text: newText };
+      }
     }
     return b;
   });
+  return { blocks: changed ? transformed : blocks, changed };
 }
 
 /**
@@ -358,17 +401,53 @@ function transformTextBlocks(
 function transformMessageContent(
   msg: Record<string, unknown>,
   fn: (text: string) => string,
-): Record<string, unknown> {
+): { message: Record<string, unknown>; changed: boolean } {
   const content = msg.content;
   if (typeof content === "string") {
     const newContent = fn(content);
-    return newContent !== content ? { ...msg, content: newContent } : msg;
+    return newContent !== content
+      ? { message: { ...msg, content: newContent }, changed: true }
+      : { message: msg, changed: false };
   }
   if (Array.isArray(content)) {
-    const newContent = transformTextBlocks(content, fn);
-    return newContent !== content ? { ...msg, content: newContent } : msg;
+    const { blocks, changed } = transformTextBlocks(content, fn);
+    return changed
+      ? { message: { ...msg, content: blocks }, changed: true }
+      : { message: msg, changed: false };
   }
-  return msg;
+  return { message: msg, changed: false };
+}
+
+function isToolCallEventType(toolName: string, event: { toolName?: string; name?: string; type?: string }): boolean {
+  return event.toolName === toolName || event.name === toolName || event.type === toolName;
+}
+
+function transformMessageInPlace(
+  message: Record<string, unknown>,
+  fn: (text: string) => string,
+): boolean {
+  const content = message.content;
+  let changed = false;
+
+  if (typeof content === "string") {
+    const newContent = fn(content);
+    if (newContent !== content) {
+      message.content = newContent;
+      changed = true;
+    }
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (isTextBlock(block)) {
+        const newText = fn(block.text);
+        if (newText !== block.text) {
+          block.text = newText;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return changed;
 }
 
 // =============================================================================
@@ -385,15 +464,8 @@ export default function (pi: ExtensionAPI): void {
   pi.on("input", async (event, ctx) => {
     if (!event.text) return { action: "continue" };
 
-    store.beginTracking();
     const masked = store.mask(event.text);
     if (masked === event.text) return { action: "continue" };
-
-    const changes = store.flushChanges();
-    if (ctx.hasUI && changes.length > 0) {
-      ctx.ui.notify(changes.map(c => store.formatChange(c)).join("\n"), "info");
-    }
-
     return { action: "transform", text: masked };
   });
 
@@ -404,35 +476,26 @@ export default function (pi: ExtensionAPI): void {
     if (store.getStats().mappingCount === 0) return {};
 
     if (isToolCallEventType("bash", event)) {
-      store.beginTracking();
-      event.input.command = store.unmask(event.input.command);
-      const changes = store.flushChanges();
-      if (ctx.hasUI && changes.length > 0) {
-        ctx.ui.notify(changes.map(c => store.formatChange(c)).join("\n"), "info");
+      if (typeof event.input?.command === "string") {
+        event.input.command = store.unmask(event.input.command);
       }
       return {};
     }
 
     if (isToolCallEventType("write", event)) {
-      store.beginTracking();
-      event.input.content = store.unmask(event.input.content);
-      const changes = store.flushChanges();
-      if (ctx.hasUI && changes.length > 0) {
-        ctx.ui.notify(changes.map(c => store.formatChange(c)).join("\n"), "info");
+      if (typeof event.input?.content === "string") {
+        event.input.content = store.unmask(event.input.content);
       }
       return {};
     }
 
     if (isToolCallEventType("edit", event)) {
-      store.beginTracking();
-      if (Array.isArray(event.input.edits)) {
+      if (Array.isArray(event.input?.edits)) {
         for (const edit of event.input.edits) {
-          edit.newText = store.unmask(edit.newText);
+          if (typeof edit.newText === "string") {
+            edit.newText = store.unmask(edit.newText);
+          }
         }
-      }
-      const changes = store.flushChanges();
-      if (ctx.hasUI && changes.length > 0) {
-        ctx.ui.notify(changes.map(c => store.formatChange(c)).join("\n"), "info");
       }
       return {};
     }
@@ -446,19 +509,9 @@ export default function (pi: ExtensionAPI): void {
   pi.on("tool_result", async (event, ctx) => {
     if (!event.content || !Array.isArray(event.content)) return {};
 
-    const isReadResult = event.toolName === "read" || event.toolName === "bash";
-
-    store.beginTracking();
-    const newContent = transformTextBlocks(event.content, (text) => store.mask(text));
-
-    if (newContent === event.content) return {};
-
-    const changes = store.flushChanges();
-    if (isReadResult && ctx.hasUI && changes.length > 0) {
-      ctx.ui.notify(changes.map(c => store.formatChange(c)).join("\n"), "info");
-    }
-
-    return { content: newContent };
+    const { blocks, changed } = transformTextBlocks(event.content, (text) => store.mask(text));
+    if (!changed) return {};
+    return { content: blocks };
   });
 
   // ---------------------------------------------------------------------------
@@ -474,11 +527,63 @@ export default function (pi: ExtensionAPI): void {
     let changed = false;
     const messages = event.messages.map((msg: Record<string, unknown>) => {
       const transformed = transformMessageContent(msg, (text) => store.mask(text));
-      if (transformed !== msg) changed = true;
-      return transformed;
+      if (transformed.changed) changed = true;
+      return transformed.message;
     });
 
     if (changed) return { messages };
+  });
+
+  // ---------------------------------------------------------------------------
+  // assistant messages — restore fake secrets before user-visible rendering.
+  // Context is masked again by the context hook before the next model call, so
+  // persisted visible messages can stay transparent to the user.
+  // ---------------------------------------------------------------------------
+  const restoreAssistantMessage = (event: { message?: Record<string, unknown> }) => {
+    if (store.getStats().mappingCount === 0) return;
+    if (!event.message || event.message.role !== "assistant") return;
+    transformMessageInPlace(event.message, (text) => store.unmask(text));
+  };
+
+  pi.on("message_update", async (event) => {
+    restoreAssistantMessage(event);
+  });
+
+  pi.on("message_end", async (event) => {
+    restoreAssistantMessage(event);
+  });
+
+  // ---------------------------------------------------------------------------
+  // /secret-mask command
+  // ---------------------------------------------------------------------------
+  pi.registerCommand("secret-mask", {
+    description: "Show pi-fake-secret status and mapping table",
+    getArgumentCompletions: (prefix: string) => {
+      const opts = ["list", "status"].filter(c => c.startsWith(prefix));
+      return opts.length > 0 ? opts.map(v => ({ value: v, label: v })) : null;
+    },
+    handler: async (args, ctx) => {
+      const cmd = (args ?? "").trim().split(/\s+/)[0];
+
+      if (cmd === "list") {
+        const mappings = store.getMappings();
+        if (mappings.length === 0) {
+          ctx.ui.notify("No secrets registered yet.", "info");
+          return;
+        }
+        const lines = mappings.map((m) => `  ${m.real}  ->  ${m.fake}`);
+        ctx.ui.notify(`Secret mappings (${mappings.length}):\n${lines.join("\n")}`, "info");
+        return;
+      }
+
+      const stats = store.getStats();
+      ctx.ui.notify(
+        `pi-fake-secret\n` +
+        `  Patterns: ${stats.patternCount}\n` +
+        `  Active mappings: ${stats.mappingCount}`,
+        "info"
+      );
+    },
   });
 
   // ---------------------------------------------------------------------------

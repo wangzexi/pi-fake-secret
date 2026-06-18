@@ -25,7 +25,13 @@
     "masking"
   ],
   "scripts": {
-    "test": "npx tsx test/core.test.ts"
+    "test": "tsx test/core.test.ts",
+    "typecheck": "tsc --noEmit"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
 }

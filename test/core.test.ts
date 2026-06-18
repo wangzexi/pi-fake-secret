@@ -1,138 +1,11 @@
 /**
- * Unit tests for pi-fake-secret core logic.
+ * Unit tests for pi-fake-secret.
  *
- * Run: npx tsx test/core.test.ts
+ * Run: npm test
  */
 
-// ---------------------------------------------------------------
-// Inline the SecretStore implementation (importing .ts is tricky)
-// ---------------------------------------------------------------
-const MAX_SCAN_SIZE = 1_048_576;
+import extension, { DEFAULT_PATTERNS, MAX_SCAN_SIZE, SecretStore } from "../index.ts";
 
-interface Pattern {
-  regex: RegExp;
-}
-
-const DEFAULT_PATTERNS: Pattern[] = [
-  { regex: /sk-[a-zA-Z0-9-]{20,}/g },
-  { regex: /(?:ghp|gho|ghs|ghu)_[a-zA-Z0-9]{36,}/g },
-  { regex: /github_pat_[a-zA-Z0-9_]{82}/g },
-  { regex: /(?:AKIA|ASIA)[A-Z0-9]{16}/g },
-  { regex: /sk_lab_[a-zA-Z0-9-]{24,}/g },
-  { regex: /sk_demo_[a-zA-Z0-9-]{24,}/g },
-  { regex: /xox[baprs]-[a-zA-Z0-9-]{10,}/g },
-  { regex: /eyJ[a-zA-Z0-9_-]+\.eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/g },
-  { regex: /-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE KEY[\s\S]*?-----END\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE KEY-----/g },
-  { regex: /-----BEGIN [A-Z ]*KEY-----[\s\S]*?-----END [A-Z ]*KEY-----/g },
-  { regex: /AIza[a-zA-Z0-9_-]{35,}/g },
-  { regex: /glpat-[a-zA-Z0-9_-]{20,}/g },
-  { regex: /SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}/g },
-];
-
-class SecretStore {
-  private realToFake = new Map<string, string>();
-  private fakeToReal = new Map<string, string>();
-  private patterns: Pattern[] = [...DEFAULT_PATTERNS];
-
-  setPatterns(p: Pattern[]): void { this.patterns = p; }
-  getPatterns(): Pattern[] { return this.patterns; }
-
-  register(real: string): string {
-    const existing = this.realToFake.get(real);
-    if (existing) return existing;
-    const fake = this.generatePlaceholder(real);
-    this.realToFake.set(real, fake);
-    this.fakeToReal.set(fake, real);
-    return fake;
-  }
-
-  resolve(fake: string): string | undefined {
-    return this.fakeToReal.get(fake);
-  }
-
-  mask(text: string): string {
-    if (!text || text.length > MAX_SCAN_SIZE) return text;
-    const matches = new Map<string, string>();
-    const seen = new Set<string>();
-    for (const { regex } of this.patterns) {
-      regex.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = regex.exec(text)) !== null) {
-        const real = m[0];
-        if (this.fakeToReal.has(real)) continue;
-        if (!seen.has(real) && real.length >= 8) {
-          seen.add(real);
-          matches.set(real, this.register(real));
-        }
-      }
-    }
-    if (matches.size === 0) return text;
-    const sorted = [...matches.entries()].sort((a, b) => b[0].length - a[0].length);
-    let result = text;
-    for (const [real, fake] of sorted) {
-      result = result.replaceAll(real, fake);
-    }
-    return result;
-  }
-
-  unmask(text: string): string {
-    if (!text || this.fakeToReal.size === 0) return text;
-    let result = text;
-    const sorted = [...this.fakeToReal.entries()]
-      .sort((a, b) => b[0].length - a[0].length);
-    for (const [fake, real] of sorted) {
-      result = result.replaceAll(fake, real);
-    }
-    return result;
-  }
-
-  generatePlaceholder(real: string): string {
-    let splitAt = 0;
-    for (let i = 0; i < real.length; i++) {
-      const ch = real[i];
-      if (ch === '-' || ch === '_' || ch === '.' || ch === '/') {
-        if (real.length - i - 1 >= 6) splitAt = i + 1;
-      }
-    }
-    if (splitAt === 0 && real.length > 8) splitAt = 4;
-
-    const prefix = real.slice(0, splitAt);
-    const body = real.slice(splitAt);
-
-    const randomizedBody = body.split('').map((ch) => {
-      if (ch >= 'a' && ch <= 'z')
-        return String.fromCharCode(97 + Math.floor(Math.random() * 26));
-      if (ch >= 'A' && ch <= 'Z')
-        return String.fromCharCode(65 + Math.floor(Math.random() * 26));
-      if (ch >= '0' && ch <= '9')
-        return String.fromCharCode(48 + Math.floor(Math.random() * 10));
-      return ch;
-    }).join('');
-
-    const result = prefix + randomizedBody;
-    if (result === real && randomizedBody.length > 0) {
-      const idx = Math.floor(Math.random() * randomizedBody.length);
-      const ch = result[splitAt + idx];
-      let replacement: string;
-      if (ch >= 'a' && ch <= 'z')
-        replacement = ch === 'a' ? 'b' : 'a';
-      else if (ch >= 'A' && ch <= 'Z')
-        replacement = ch === 'A' ? 'B' : 'A';
-      else
-        replacement = ch === '0' ? '1' : '0';
-      return result.slice(0, splitAt + idx) + replacement + result.slice(splitAt + idx + 1);
-    }
-    return result;
-  }
-
-  getStats(): { patternCount: number; mappingCount: number } {
-    return { patternCount: this.patterns.length, mappingCount: this.realToFake.size };
-  }
-}
-
-// ---------------------------------------------------------------
-// Test harness
-// ---------------------------------------------------------------
 let passed = 0;
 let failed = 0;
 
@@ -141,7 +14,7 @@ function assert(condition: boolean, msg: string): void {
     passed++;
   } else {
     failed++;
-    console.error(`  ❌ ${msg}`);
+    console.error(`  FAIL ${msg}`);
   }
 }
 
@@ -150,346 +23,242 @@ function assertEqual<T>(actual: T, expected: T, msg: string): void {
     passed++;
   } else {
     failed++;
-    console.error(`  ❌ ${msg}`);
+    console.error(`  FAIL ${msg}`);
     console.error(`     expected: ${JSON.stringify(expected)}`);
     console.error(`     actual:   ${JSON.stringify(actual)}`);
   }
 }
 
-// ---------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------
-
-// 1. Registration and 1:1 mapping
-console.log('\n📦 Registration & 1:1 mapping');
-{
-  const s = new SecretStore();
-  const p1 = s.register('sk-proj-AbCdEfGhIjKlMnOp1234567890');
-  const p2 = s.register('sk-proj-AbCdEfGhIjKlMnOp1234567890');
-  assertEqual(p1, p2, 'same real → same fake');
-  assertEqual(s.resolve(p1), 'sk-proj-AbCdEfGhIjKlMnOp1234567890', 'resolve returns original');
-  assertEqual(s.resolve('nonexistent'), undefined, 'unknown fake → undefined');
+function createStore(): SecretStore {
+  const store = new SecretStore();
+  store.setPatterns(DEFAULT_PATTERNS);
+  return store;
 }
 
-// 2. Placeholder format: prefix preserved, same length
-console.log('\n📦 Placeholder format');
+function textBlock(text: string): Array<{ type: "text"; text: string }> {
+  return [{ type: "text", text }];
+}
+
+const openAiKey = (body = "AbCdEfGhIjKlMnOp1234567890") => ["sk", "proj", body].join("-");
+const anthropicKey = (body = "AbCdEfGhIjKlMnOp1234567890abcdefgh") => ["sk", "ant", "api03", body].join("-");
+const githubToken = (body = "AbCdEfGhIjKlMnOp1234567890AbCdEfGhIjKlMnOp1234") => ["ghp", body].join("_");
+const githubPat = () => "github_pat_" + "A".repeat(82);
+const awsKey = () => "AKIA" + "IOSFODNN7EXAMPLE";
+const stripeKey = (mode: "live" | "test", body = "AbCdEfGhIjKlMnOp12345678901234") => ["sk", mode, body].join("_");
+const slackToken = () => ["xoxb", "1234567890", "abcdef"].join("-");
+const googleKey = () => "AI" + "za" + "a".repeat(35);
+const gitlabToken = () => "gl" + "pat-" + "a".repeat(20);
+
+class MockPi {
+  handlers = new Map<string, (event: any, ctx: any) => Promise<any> | any>();
+  commands = new Map<string, any>();
+  notifications: string[] = [];
+  ctx = {
+    hasUI: true,
+    ui: {
+      notify: (message: string) => {
+        this.notifications.push(message);
+      },
+    },
+  };
+
+  on(name: string, handler: (event: any, ctx: any) => Promise<any> | any): void {
+    this.handlers.set(name, handler);
+  }
+
+  registerCommand(name: string, options: any): void {
+    this.commands.set(name, options);
+  }
+
+  async emit(name: string, event: any): Promise<any> {
+    const handler = this.handlers.get(name);
+    if (!handler) throw new Error(`missing handler: ${name}`);
+    return handler(event, this.ctx);
+  }
+}
+
+console.log("\nRegistration & mapping");
 {
-  const s = new SecretStore();
+  const s = createStore();
+  const real = openAiKey();
+  const p1 = s.register(real);
+  const p2 = s.register(real);
+  assertEqual(p1, p2, "same real maps to same fake");
+  assertEqual(s.resolve(p1), real, "fake resolves to real");
+  assertEqual(s.resolve("missing"), undefined, "unknown fake does not resolve");
+}
+
+console.log("\nFake format");
+{
+  const s = createStore();
   const cases = [
-    'sk-proj-AbCdEfGhIjKlMnOp1234567890',
-    'ghp_AbCdEfGhIjKlMnOp1234567890AbCdEfGhIjKlMnOp1234',
-    'sk_lab_AbCdEfGhIjKlMnOp12345678901234',
-    'AKIAIOSFODNN7EXAMPLE',
-    'sk-ant-api03-AbCdEfGhIjKlMnOp1234567890abcdefgh',
+    openAiKey(),
+    anthropicKey(),
+    githubToken(),
+    githubPat(),
+    awsKey(),
+    stripeKey("live"),
+    stripeKey("test"),
+    slackToken(),
+    googleKey(),
+    gitlabToken(),
   ];
+
   for (const original of cases) {
-    const p = s.register(original);
-    assert(p.startsWith(original.slice(0, 3)), `prefix preserved: ${original} → ${p}`);
-    assertEqual(p.length, original.length, `same length: ${original} (${original.length}) → ${p} (${p.length})`);
-    assert(p !== original, `different from original: ${original}`);
-    // Characters at non-alphanumeric positions should be identical
+    const fake = s.register(original);
+    assertEqual(fake.length, original.length, `same length for ${original.slice(0, 12)}`);
+    assert(fake !== original, `fake differs for ${original.slice(0, 12)}`);
     for (let i = 0; i < original.length; i++) {
-      const oc = original[i];
-      if (!/[a-zA-Z0-9]/.test(oc)) {
-        assertEqual(p[i], oc, `separator '${oc}' preserved at pos ${i}: ${original} → ${p}`);
+      const ch = original[i];
+      if (!/[a-zA-Z0-9]/.test(ch)) {
+        assertEqual(fake[i], ch, `separator preserved at ${i}`);
       }
     }
   }
 }
 
-// 3. mask() basic
-console.log('\n📦 mask() basic');
+console.log("\nMask and unmask");
 {
-  const s = new SecretStore();
-  const input = 'my key is sk-proj-AbCdEfGhIjKlMnOp1234567890';
+  const s = createStore();
+  const openai = openAiKey();
+  const anthropic = anthropicKey();
+  const github = githubToken();
+  const stripe = stripeKey("live");
+  const aws = awsKey();
+  const input = [
+    `OPENAI_API_KEY=${openai}`,
+    `ANTHROPIC_API_KEY=${anthropic}`,
+    `GITHUB_TOKEN=${github}`,
+    `STRIPE_KEY=${stripe}`,
+    `AWS_KEY=${aws}`,
+  ].join("\n");
   const masked = s.mask(input);
-  assert(masked !== input, 'text changed');
-  assert(!masked.includes('sk-proj-AbCdEfGhIjKlMnOp1234567890'), 'original secret removed');
-  assert(masked.includes('sk-proj-'), 'prefix kept');
-  assertEqual(s.getStats().mappingCount, 1, 'one secret registered');
+  assert(!masked.includes(openai), "OpenAI key masked");
+  assert(!masked.includes(anthropic), "Anthropic key masked");
+  assert(!masked.includes(github), "GitHub token masked");
+  assert(!masked.includes(stripe), "Stripe key masked");
+  assert(!masked.includes(aws), "AWS key masked");
+  assertEqual(s.getStats().mappingCount, 5, "five secrets registered");
+  assertEqual(s.unmask(masked), input, "round trip restores exact input");
 }
 
-// 4. mask() multiple secrets
-console.log('\n📦 mask() multiple secrets');
+console.log("\nKnown fakes are stable");
 {
-  const s = new SecretStore();
-  const input = 'OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOp1234567890\nGITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOp1234567890AbCdEfGhIjKlMnOp1234';
-  const masked = s.mask(input);
-  assert(!masked.includes('sk-proj-AbCdEfGhIjKlMnOp1234567890'), 'openai key masked');
-  assert(!masked.includes('ghp_AbCdEfGhIjKlMnOp1234567890AbCdEfGhIjKlMnOp1234'), 'github token masked');
-  assert(masked.includes('OPENAI_API_KEY='), 'env var name kept');
-  assert(masked.includes('GITHUB_TOKEN='), 'env var name kept');
+  const s = createStore();
+  const real = openAiKey("ORIGINAL-VALUE-1234567890");
+  const masked = s.mask(`key=${real}`);
+  const fake = masked.match(/sk-proj-[a-zA-Z0-9-]+/)?.[0];
+  assert(!!fake, "fake extracted");
+  assertEqual(s.getStats().mappingCount, 1, "one mapping after first mask");
+  const remasked = s.mask(`key=${fake}`);
+  assertEqual(s.getStats().mappingCount, 1, "known fake was not re-registered");
+  assertEqual(s.unmask(remasked), `key=${real}`, "known fake still restores");
 }
 
-// 5. Full round-trip: mask → unmask
-console.log('\n📦 Full round-trip: mask → unmask');
+console.log("\nFake generation is deterministic");
 {
-  const s = new SecretStore();
-  const input = 'OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOp1234567890';
-  const masked = s.mask(input);
-  const unmasked = s.unmask(masked);
-  assertEqual(unmasked, input, 'round-trip preserves original');
+  const real = openAiKey("CACHE-STABLE-1234567890");
+  const first = createStore().register(real);
+  const second = createStore().register(real);
+  assertEqual(first, second, "same real maps to same fake across stores");
 }
 
-// 6. unmask in bash command
-console.log('\n📦 unmask() bash commands');
+console.log("\nLarge text scan");
 {
-  const s = new SecretStore();
-  const input = 'use key sk-proj-AbCdEfGhIjKlMnOp1234567890';
-  const masked = s.mask(input);
-
-  // Simulate model writing a bash command using the fake
-  const fake = masked.match(/sk-proj-[a-zA-Z0-9]+/)[0];
-  const bashCmd = `echo ${fake} > /tmp/key.txt`;
-
-  const unmasked = s.unmask(bashCmd);
-  assertEqual(unmasked, 'echo sk-proj-AbCdEfGhIjKlMnOp1234567890 > /tmp/key.txt',
-    'bash command restored to real value');
-}
-
-// 7. No false positives on clean text
-console.log('\n📦 No false positives');
-{
-  const s = new SecretStore();
-  const inputs = [
-    'hello world',
-    'a = 1 + 2',
-    'export FOO=bar',
-    'just a regular string without secrets',
-    'prefix-sk-but-too-short',
-  ];
-  for (const input of inputs) {
-    const masked = s.mask(input);
-    assertEqual(masked, input, `clean text unchanged: ${input.slice(0, 40)}`);
-  }
-}
-
-// 8. Multiple occurrences of the same secret
-console.log('\n📦 Multiple occurrences of the same secret');
-{
-  const s = new SecretStore();
-  const input = 'key=sk-proj-AbCdEfGhIjKlMnOp1234567890 and again key=sk-proj-AbCdEfGhIjKlMnOp1234567890';
-  const masked = s.mask(input);
-  const count = (masked.match(/sk-proj-/g) || []).length;
-  assertEqual(count, 2, 'both occurrences replaced');
-  assertEqual(s.getStats().mappingCount, 1, 'only one mapping registered');
-}
-
-// 9. Large text truncation
-console.log('\n📦 Large text (beyond MAX_SCAN_SIZE)');
-{
-  const s = new SecretStore();
-  const secret = 'sk-proj-AbCdEfGhIjKlMnOp1234567890';
-  const large = 'x'.repeat(MAX_SCAN_SIZE + 100) + ' ' + secret;
+  const s = createStore();
+  const secret = openAiKey("LARGE-TEXT-SECRET-1234567890");
+  const large = "x".repeat(MAX_SCAN_SIZE + 100) + secret;
   const masked = s.mask(large);
-  assert(masked.includes(secret), 'secret NOT masked in oversized text');
+  assert(!masked.includes(secret), "secret after 1 MB is masked");
+  assertEqual(s.unmask(masked), large, "large text round trip restores");
 }
 
-// 10. env file scenario
-console.log('\n📦 .env file simulation');
+console.log("\nExtension hooks");
 {
-  const s = new SecretStore();
-  const envFile = [
-    '# Test env',
-    'OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOp1234567890',
-    'ANTHROPIC_API_KEY=sk-ant-api03-AbCdEfGhIjKlMnOp1234567890abcdefgh',
-    'GITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOp1234567890AbCdEfGhIjKlMnOp1234',
-    'STRIPE_KEY=sk_lab_AbCdEfGhIjKlMnOp12345678901234',
-    'AWS_KEY=AKIAIOSFODNN7EXAMPLE',
-  ].join('\n');
+  const pi = new MockPi();
+  extension(pi as any);
 
-  const masked = s.mask(envFile);
-  // All variable names preserved
-  assert(masked.includes('OPENAI_API_KEY='), 'OPENAI_API_KEY= preserved');
-  assert(masked.includes('ANTHROPIC_API_KEY='), 'ANTHROPIC_API_KEY= preserved');
-  assert(masked.includes('GITHUB_TOKEN='), 'GITHUB_TOKEN= preserved');
-  assert(masked.includes('STRIPE_KEY='), 'STRIPE_KEY= preserved');
-  assert(masked.includes('AWS_KEY='), 'AWS_KEY= preserved');
-  // Comments preserved
-  assert(masked.includes('# Test env'), 'comment preserved');
-  // Values replaced
-  assert(!masked.includes('sk-proj-AbCdEfGhIjKlMnOp1234567890'), 'openai value masked');
-  // 5 secrets registered
-  assertEqual(s.getStats().mappingCount, 5, '5 secrets registered');
+  assert(pi.handlers.has("input"), "input hook registered");
+  assert(pi.handlers.has("tool_call"), "tool_call hook registered");
+  assert(pi.handlers.has("tool_result"), "tool_result hook registered");
+  assert(pi.handlers.has("context"), "context hook registered");
+  assert(pi.handlers.has("message_update"), "message_update hook registered");
+  assert(pi.handlers.has("message_end"), "message_end hook registered");
+  assert(pi.commands.has("secret-mask"), "secret-mask command registered");
 
-  // Round-trip
-  const unmasked = s.unmask(masked);
-  assertEqual(unmasked, envFile, 'full env file round-trips correctly');
-}
+  const real = openAiKey("HOOK-SECRET-112233445566");
+  const inputResult = await pi.emit("input", { text: `please use ${real}` });
+  assertEqual(inputResult.action, "transform", "input is transformed");
+  assert(!inputResult.text.includes(real), "model input does not contain real secret");
+  const fake = inputResult.text.match(/sk-proj-[a-zA-Z0-9-]+/)?.[0];
+  assert(!!fake, "fake visible to model");
 
-// 11. Don't re-register known fakes
-console.log('\n📦 No re-registration of known fakes');
-{
-  const s = new SecretStore();
-  const orig = 'sk-proj-ORIGINAL-VALUE-1234567890';
-  // First: register and mask
-  const masked = s.mask(`key=${orig}`);
-  assert(!masked.includes(orig), 'original removed after first mask');
-  assertEqual(s.getStats().mappingCount, 1, 'one secret registered');
+  const bash = { toolName: "bash", input: { command: `echo ${fake}` } };
+  await pi.emit("tool_call", bash);
+  assertEqual(bash.input.command, `echo ${real}`, "bash command restores real secret");
 
-  // Extract the fake from masked output
-  const fake = masked.match(/sk-proj-[a-zA-Z0-9-]+/)[0];
+  const write = { toolName: "write", input: { content: `TOKEN=${fake}` } };
+  await pi.emit("tool_call", write);
+  assertEqual(write.input.content, `TOKEN=${real}`, "write content restores real secret");
 
-  // Second: mask again with the fake in the text (simulating
-  // a tool_result containing the fake)
-  const reMasked = s.mask(`found key: ${fake}`);
-  // The fake should NOT be re-registered — it's already a known fake
-  assertEqual(s.getStats().mappingCount, 1, 'no new registration for existing fake');
-  assert(reMasked.includes(fake), 'fake preserved (not re-masked)');
+  const readResult = await pi.emit("tool_result", {
+    toolName: "read",
+    content: textBlock(`TOKEN=${real}`),
+  });
+  assert(!readResult.content[0].text.includes(real), "read result masks real secret");
+  assert(readResult.content[0].text.includes(fake), "read result reuses existing fake");
 
-  // Third: unmask should still work
-  const unmasked = s.unmask(reMasked);
-  assertEqual(unmasked, `found key: ${orig}`, 'round-trip still works after re-mask guard');
-}
+  const contextResult = await pi.emit("context", {
+    messages: [{ role: "user", content: `read this: ${real}` }],
+  });
+  assert(!contextResult.messages[0].content.includes(real), "context masks real secret");
 
-// 12. AWS key fake format
-console.log('\n📦 AWS key format');
-{
-  const s = new SecretStore();
-  const p = s.register('AKIAIOSFODNN7EXAMPLE');
-  assert(p.startsWith('AKIA'), 'AKIA prefix kept');
-  assertEqual(p.length, 20, 'same length as AKIA... key');
-  assert(p !== 'AKIAIOSFODNN7EXAMPLE', 'different value');
-}
-
-// 13. Re-mask doesn't create stale mappings (simulating ! command output)
-console.log('\n📦 No stale mappings on re-mask');
-{
-  const s = new SecretStore();
-  // Simulate: user runs `!cat file` which outputs a secret
-  const bashOutput = 'KEY=sk-proj-AbCdEfGhIjKlMnOp1234567890';
-  const maskedOnce = s.mask(bashOutput);
-  const fake = maskedOnce.match(/sk-proj-[a-zA-Z0-9-]+/)[0];
-  assertEqual(s.getStats().mappingCount, 1, 'one mapping after first mask');
-
-  // Simulate: the same bash output appears again (e.g., in context history)
-  const maskedTwice = s.mask(bashOutput);
-  // The same fake should be used — same real → same fake
-  assert(maskedTwice.includes(fake),
-    'same fake used on re-mask of same secret');
-  assertEqual(s.getStats().mappingCount, 1,
-    'no extra mappings on re-mask');
-}
-
-// 14. Round-trip with second occurrence
-console.log('\n📦 Bash ! command scenario: output → context → LLM');
-{
-  const s = new SecretStore();
-  const fileContent = 'DATABASE_URL=postgres://user:sk-proj-DB-SECRET-888877776655@localhost/db';
-
-  // Phase 1: !cat file → output goes to terminal AND context (masked)
-  const masked = s.mask(fileContent);
-  assert(!masked.includes('sk-proj-DB-SECRET-888877776655'), 'secret masked from ! output');
-  assert(masked.includes('postgres://user:'), 'URL structure preserved');
-
-  // Extract fake
-  const fake = masked.match(/sk-proj-[a-zA-Z0-9-]+/)[0];
-
-  // Phase 2: masked content is in context history
-  // context handler calls mask() again
-  const reMasked = s.mask(masked);
-  assert(reMasked.includes(fake),
-    'fake preserved in re-mask (not double-masked)');
-
-  // Phase 3: unmask should still work
-  const unmasked = s.unmask(fake);
-  assertEqual(unmasked, 'sk-proj-DB-SECRET-888877776655',
-    'fake can still be resolved');
-}
-
-// 15. Write tool unmask
-console.log('\n📦 Write tool unmask (fake → real before file write)');
-{
-  const s = new SecretStore();
-  const fake = s.register('sk-proj-WRITE-TEST-REAL-KEY-001122334455');
-
-  // Simulate: model writes fake content to file
-  const modelContent = `DATABASE_URL=postgres://user:${fake}@localhost/db\nKEY=${fake}`;
-  const unmasked = s.unmask(modelContent);
-  assert(!unmasked.includes(fake),
-    'fake replaced before write');
-  assert(unmasked.includes('sk-proj-WRITE-TEST-REAL-KEY-001122334455'),
-    'real value restored in write content');
-  assertEqual(
-    unmasked.match(/sk-proj-[a-zA-Z0-9-]+/g)!.length, 2,
-    'both occurrences restored'
-  );
-}
-
-// 16. Edit tool unmask
-console.log('\n📦 Edit tool unmask (fake → real before file edit)');
-{
-  const s = new SecretStore();
-  const fake = s.register('sk-proj-EDIT-REAL-KEY-9988776655443322');
-
-  // Simulate: model edits a file, replacing old value with fake
-  const edits: { oldText: string; newText: string }[] = [
-    { oldText: 'old_key=xxx', newText: `new_key=${fake}` }
-  ];
-  for (const edit of edits) {
-    edit.newText = s.unmask(edit.newText);
-  }
-  assert(!edits[0].newText.includes(fake),
-    'fake replaced in edit.newText');
-  assert(edits[0].newText.includes('sk-proj-EDIT-REAL-KEY-9988776655443322'),
-    'real value restored in edit');
-}
-
-// 17. Write-read round trip (model writes fake → reads back → sees fake)
-console.log('\n📦 Write → read round-trip (fake preserved)');
-{
-  const s = new SecretStore();
-  const real = 'ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij';
-  const fake = s.register(real);
-
-  // Phase 1: model writes file (should unmask to real)
-  const writeContent = `GITHUB_TOKEN=${fake}`;
-  const diskContent = s.unmask(writeContent);
-  assert(diskContent.includes('ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij'),
-    'file on disk has real value');
-
-  // Phase 2: model reads the file back
-  // tool_result calls mask() on the read content
-  const readResult = s.mask(diskContent);
-  assert(readResult.includes(fake),
-    'model sees fake when reading back');
-
-  // Phase 3: model uses the fake in bash
-  const bashCommand = `curl -H "Authorization: token ${fake}" https://api.github.com/user`;
-  const executedCommand = s.unmask(bashCommand);
-  assert(executedCommand.includes('ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghij'),
-    'bash command gets real value at execution time');
-  assertEqual(s.getStats().mappingCount, 1,
-    'single mapping throughout the cycle');
-
-}
-
-// 18. JSON deep-scan (simulating before_provider_request)
-console.log('\n📦 JSON payload scan (before_provider_request)');
-{
-  const s = new SecretStore();
-  const payload = {
-    model: 'gpt-4',
-    messages: [
-      { role: 'user', content: 'my key is sk-proj-JSON-SCENARIO-TEST-1122334455' }
-    ]
+  const assistantUpdate = {
+    message: {
+      role: "assistant",
+      content: textBlock(`I found ${fake}`),
+    },
   };
-  const json = JSON.stringify(payload);
-  const masked = s.mask(json);
-  assert(!masked.includes('sk-proj-JSON-SCENARIO-TEST-1122334455'),
-    'secret masked in JSON string');
-  assert(masked.includes('my key is'), 'text structure preserved');
+  await pi.emit("message_update", assistantUpdate);
+  assertEqual(
+    assistantUpdate.message.content[0].text,
+    `I found ${real}`,
+    "streaming assistant output restores real secret for the user",
+  );
 
-  // Should be parseable back
-  const parsed = JSON.parse(masked);
-  assertEqual(parsed.messages[0].role, 'user', 'JSON structure valid after mask');
-  assert(!parsed.messages[0].content.includes('sk-proj-JSON-SCENARIO-TEST-1122334455'),
-    'parsed content is masked');
+  const assistantEnd = {
+    message: {
+      role: "assistant",
+      content: textBlock(`Final answer: ${fake}`),
+    },
+  };
+  await pi.emit("message_end", assistantEnd);
+  assertEqual(
+    assistantEnd.message.content[0].text,
+    `Final answer: ${real}`,
+    "final assistant output restores real secret for the user",
+  );
+
+  const nextContext = await pi.emit("context", {
+    messages: [assistantEnd.message],
+  });
+  assert(!nextContext.messages[0].content[0].text.includes(real), "persisted visible answer is masked again for model context");
+  assert(nextContext.messages[0].content[0].text.includes(fake), "model context sees fake after transparent user output");
 }
 
-// ---------------------------------------------------------------
-// Summary
-// ---------------------------------------------------------------
-console.log(`\n${'='.repeat(50)}`);
+console.log("\nNo dirty tracking after clean input");
+{
+  const pi = new MockPi();
+  extension(pi as any);
+  await pi.emit("input", { text: "hello, no secret here" });
+  const result = await pi.emit("tool_result", {
+    toolName: "bash",
+    content: textBlock("plain output"),
+  });
+  assertEqual(result.content, undefined, "clean tool result is not transformed");
+  assertEqual(pi.notifications.length, 0, "extension stays silent for user transparency");
+}
+
+console.log(`\n${"=".repeat(50)}`);
 console.log(`Results: ${passed} passed, ${failed} failed, ${passed + failed} total`);
 if (failed > 0) process.exit(1);
