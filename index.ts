@@ -482,8 +482,8 @@ function notifySecurity(ctx: any, changes: SecretChange[], direction: "protected
 
   const details = hints.join(", ");
   const message = direction === "protected"
-    ? `🎭 模型将仅看到 ${details} 的替身。`
-    : `🎭 已还原真实密钥 ${details}。`;
+    ? `🎭 模型仅会看到 ${details} 的替身。`
+    : `🎭 已还原 ${details} 的替身。`;
   ctx.ui.notify(message, "info");
 }
 

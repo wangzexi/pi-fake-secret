@@ -193,14 +193,14 @@ console.log("\nExtension hooks");
   assert(!inputResult.text.includes(real), "model input does not contain real secret");
   const fake = inputResult.text.match(/sk-proj-[a-zA-Z0-9-]+/)?.[0];
   assert(!!fake, "fake visible to model");
-  assert(pi.notifications.some((n) => n.includes(`🎭 模型将仅看到 ${hint(real)} 的替身。`)), "user is notified with masked real hint");
+  assert(pi.notifications.some((n) => n.includes(`🎭 模型仅会看到 ${hint(real)} 的替身。`)), "user is notified with masked real hint");
   assert(!pi.notifications.some((n) => n.includes(real)), "notification does not reveal real secret");
   assert(!pi.notifications.some((n) => n.includes(fake!)), "notification does not reveal fake secret");
 
   const bash = { toolName: "bash", input: { command: `echo ${fake}` } };
   await pi.emit("tool_call", bash);
   assertEqual(bash.input.command, `echo ${real}`, "bash command restores real secret");
-  assert(pi.notifications.some((n) => n.includes(`🎭 已还原真实密钥 ${hint(real)}。`)), "user is notified when secret is restored");
+  assert(pi.notifications.some((n) => n.includes(`🎭 已还原 ${hint(real)} 的替身。`)), "user is notified when secret is restored");
 
   const write = { toolName: "write", input: { content: `TOKEN=${fake}` } };
   await pi.emit("tool_call", write);
@@ -212,7 +212,7 @@ console.log("\nExtension hooks");
   });
   assert(!readResult.content[0].text.includes(real), "read result masks real secret");
   assert(readResult.content[0].text.includes(fake), "read result reuses existing fake");
-  assert(pi.notifications.filter((n) => n.includes("模型将仅看到")).length >= 2, "read result protection is notified");
+  assert(pi.notifications.filter((n) => n.includes("模型仅会看到")).length >= 2, "read result protection is notified");
 
   const contextResult = await pi.emit("context", {
     messages: [{ role: "user", content: `read this: ${real}` }],
@@ -231,7 +231,7 @@ console.log("\nExtension hooks");
     `I found ${real}`,
     "streaming assistant output restores real secret for the user",
   );
-  assert(pi.notifications.filter((n) => n.includes("已还原真实密钥")).length >= 2, "assistant output restore is notified");
+  assert(pi.notifications.filter((n) => n.includes("已还原")).length >= 2, "assistant output restore is notified");
 
   const assistantEnd = {
     message: {
