@@ -26,7 +26,6 @@
 pi install /path/to/pi-fake-secret
 ```
 
-重启 pi 或 `/reload` 激活。
 
 ## 使用
 
