@@ -31,11 +31,6 @@ pi install /path/to/pi-fake-secret
 
 自动运行，无需配置。
 
-| 命令 | 说明 |
-|---------|------|
-| `/secret-mask status` | 映射统计 |
-| `/secret-mask list` | 列出所有映射 |
-
 通知示例：
 
 ```

@@ -482,39 +482,4 @@ export default function (pi: ExtensionAPI): void {
   });
 
   // ---------------------------------------------------------------------------
-  // /secret-mask command
-  // ---------------------------------------------------------------------------
-  pi.registerCommand("secret-mask", {
-    description: "Show pi-fake-secret status and mapping table",
-    getArgumentCompletions: (prefix: string) => {
-      const opts = ["list", "status"].filter(c => c.startsWith(prefix));
-      return opts.length > 0 ? opts.map(v => ({ value: v, label: v })) : null;
-    },
-    handler: async (args, ctx) => {
-      const cmd = (args ?? "").trim().split(/\s+/)[0];
-
-      if (cmd === "list") {
-        const mappings = store.getMappings();
-        if (mappings.length === 0) {
-          ctx.ui.notify("No secrets registered yet.", "info");
-          return;
-        }
-        // Display in a simple format
-        const lines = mappings.map(
-          (m) => `  ${m.real}  →  ${m.fake}`
-        );
-        ctx.ui.notify(`Secret mappings (${mappings.length}):\n${lines.join("\n")}`, "info");
-        return;
-      }
-
-      // Default: status
-      const stats = store.getStats();
-      ctx.ui.notify(
-        `pi-fake-secret\n` +
-        `  Patterns: ${stats.patternCount}\n` +
-        `  Active mappings: ${stats.mappingCount}`,
-        "info"
-      );
-    },
-  });
 }
