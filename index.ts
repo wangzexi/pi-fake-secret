@@ -466,21 +466,6 @@ export default function (pi: ExtensionAPI): void {
   // terminal unchanged so they see real values. When the output enters the LLM
   // context, the context handler below fakes secrets before the next model call.
   // ---------------------------------------------------------------------------
-  // before_provider_request — silent last defense before payload leaves
-  // ---------------------------------------------------------------------------
-  pi.on("before_provider_request", (event, _ctx) => {
-    try {
-      const json = JSON.stringify(event.payload);
-      const masked = store.mask(json);
-      if (masked !== json && masked.length > 0) {
-        return JSON.parse(masked);
-      }
-    } catch {
-      // Never break the provider call
-    }
-  });
-
-  // ---------------------------------------------------------------------------
   // context — silent full history scan before each LLM call
   // ---------------------------------------------------------------------------
   pi.on("context", async (event, _ctx) => {
