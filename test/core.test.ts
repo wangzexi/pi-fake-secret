@@ -1,7 +1,7 @@
 /**
  * Unit tests for pi-secret-mask core logic.
  *
- * Run: node test/core.test.js
+ * Run: npx tsx test/core.test.ts
  */
 
 // ---------------------------------------------------------------
@@ -9,7 +9,11 @@
 // ---------------------------------------------------------------
 const MAX_SCAN_SIZE = 1_048_576;
 
-const DEFAULT_PATTERNS = [
+interface Pattern {
+  regex: RegExp;
+}
+
+const DEFAULT_PATTERNS: Pattern[] = [
   { regex: /sk-[a-zA-Z0-9-]{20,}/g },
   { regex: /(?:ghp|gho|ghs|ghu)_[a-zA-Z0-9]{36,}/g },
   { regex: /github_pat_[a-zA-Z0-9_]{82}/g },
@@ -26,16 +30,14 @@ const DEFAULT_PATTERNS = [
 ];
 
 class SecretStore {
-  constructor() {
-    this.realToPlaceholder = new Map();
-    this.placeholderToReal = new Map();
-    this.patterns = [...DEFAULT_PATTERNS];
-  }
+  private realToPlaceholder = new Map<string, string>();
+  private placeholderToReal = new Map<string, string>();
+  private patterns: Pattern[] = [...DEFAULT_PATTERNS];
 
-  setPatterns(p) { this.patterns = p; }
-  getPatterns() { return this.patterns; }
+  setPatterns(p: Pattern[]): void { this.patterns = p; }
+  getPatterns(): Pattern[] { return this.patterns; }
 
-  register(real) {
+  register(real: string): string {
     const existing = this.realToPlaceholder.get(real);
     if (existing) return existing;
     const placeholder = this.generatePlaceholder(real);
@@ -44,17 +46,17 @@ class SecretStore {
     return placeholder;
   }
 
-  resolve(placeholder) {
+  resolve(placeholder: string): string | undefined {
     return this.placeholderToReal.get(placeholder);
   }
 
-  mask(text) {
+  mask(text: string): string {
     if (!text || text.length > MAX_SCAN_SIZE) return text;
-    const matches = new Map();
-    const seen = new Set();
+    const matches = new Map<string, string>();
+    const seen = new Set<string>();
     for (const { regex } of this.patterns) {
       regex.lastIndex = 0;
-      let m;
+      let m: RegExpExecArray | null;
       while ((m = regex.exec(text)) !== null) {
         const real = m[0];
         if (this.placeholderToReal.has(real)) continue;
@@ -73,7 +75,7 @@ class SecretStore {
     return result;
   }
 
-  unmask(text) {
+  unmask(text: string): string {
     if (!text || this.placeholderToReal.size === 0) return text;
     let result = text;
     const sorted = [...this.placeholderToReal.entries()]
@@ -84,7 +86,7 @@ class SecretStore {
     return result;
   }
 
-  generatePlaceholder(real) {
+  generatePlaceholder(real: string): string {
     let splitAt = 0;
     for (let i = 0; i < real.length; i++) {
       const ch = real[i];
@@ -111,7 +113,7 @@ class SecretStore {
     if (result === real && randomizedBody.length > 0) {
       const idx = Math.floor(Math.random() * randomizedBody.length);
       const ch = result[splitAt + idx];
-      let replacement;
+      let replacement: string;
       if (ch >= 'a' && ch <= 'z')
         replacement = ch === 'a' ? 'b' : 'a';
       else if (ch >= 'A' && ch <= 'Z')
@@ -123,7 +125,7 @@ class SecretStore {
     return result;
   }
 
-  getStats() {
+  getStats(): { patternCount: number; mappingCount: number } {
     return { patternCount: this.patterns.length, mappingCount: this.realToPlaceholder.size };
   }
 }
@@ -134,7 +136,7 @@ class SecretStore {
 let passed = 0;
 let failed = 0;
 
-function assert(condition, msg) {
+function assert(condition: boolean, msg: string): void {
   if (condition) {
     passed++;
   } else {
@@ -143,7 +145,7 @@ function assert(condition, msg) {
   }
 }
 
-function assertEqual(actual, expected, msg) {
+function assertEqual<T>(actual: T, expected: T, msg: string): void {
   if (actual === expected) {
     passed++;
   } else {
@@ -409,7 +411,7 @@ console.log('\n📦 Write tool unmask (placeholder → real before file write)')
   assert(unmasked.includes('sk-proj-WRITE-TEST-REAL-KEY-001122334455'),
     'real value restored in write content');
   assertEqual(
-    unmasked.match(/sk-proj-[a-zA-Z0-9-]+/g).length, 2,
+    unmasked.match(/sk-proj-[a-zA-Z0-9-]+/g)!.length, 2,
     'both occurrences restored'
   );
 }
@@ -421,7 +423,7 @@ console.log('\n📦 Edit tool unmask (placeholder → real before file edit)');
   const placeholder = s.register('sk-proj-EDIT-REAL-KEY-9988776655443322');
 
   // Simulate: model edits a file, replacing old value with placeholder
-  const edits = [
+  const edits: { oldText: string; newText: string }[] = [
     { oldText: 'old_key=xxx', newText: `new_key=${placeholder}` }
   ];
   for (const edit of edits) {

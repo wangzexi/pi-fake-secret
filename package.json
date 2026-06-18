@@ -1,7 +1,7 @@
 {
   "name": "pi-secret-mask",
   "version": "0.1.0",
-  "description": "Pi extension that masks real secrets with lookalike placeholders before they reach the LLM, and restores them at execution time. The model never sees the real value.",
+  "description": "Pi 插件：在密钥到达 LLM 之前用形似占位符替换，执行时再恢复为真实值。模型永远看不到真实密钥。",
   "type": "module",
   "main": "index.ts",
   "files": [
@@ -24,5 +24,8 @@
     "redaction",
     "masking"
   ],
+  "scripts": {
+    "test": "tsx test/core.test.ts"
+  },
   "license": "MIT"
 }
