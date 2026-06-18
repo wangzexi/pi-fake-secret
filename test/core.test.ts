@@ -192,10 +192,14 @@ console.log("\nExtension hooks");
   assert(!inputResult.text.includes(real), "model input does not contain real secret");
   const fake = inputResult.text.match(/sk-proj-[a-zA-Z0-9-]+/)?.[0];
   assert(!!fake, "fake visible to model");
+  assert(pi.notifications.some((n) => n.includes("已保护")), "user is notified when secret is protected");
+  assert(!pi.notifications.some((n) => n.includes(real)), "notification does not reveal real secret");
+  assert(!pi.notifications.some((n) => n.includes(fake!)), "notification does not reveal fake secret");
 
   const bash = { toolName: "bash", input: { command: `echo ${fake}` } };
   await pi.emit("tool_call", bash);
   assertEqual(bash.input.command, `echo ${real}`, "bash command restores real secret");
+  assert(pi.notifications.some((n) => n.includes("已还原")), "user is notified when secret is restored");
 
   const write = { toolName: "write", input: { content: `TOKEN=${fake}` } };
   await pi.emit("tool_call", write);
@@ -207,6 +211,7 @@ console.log("\nExtension hooks");
   });
   assert(!readResult.content[0].text.includes(real), "read result masks real secret");
   assert(readResult.content[0].text.includes(fake), "read result reuses existing fake");
+  assert(pi.notifications.filter((n) => n.includes("已保护")).length >= 2, "read result protection is notified");
 
   const contextResult = await pi.emit("context", {
     messages: [{ role: "user", content: `read this: ${real}` }],
@@ -225,6 +230,7 @@ console.log("\nExtension hooks");
     `I found ${real}`,
     "streaming assistant output restores real secret for the user",
   );
+  assert(pi.notifications.filter((n) => n.includes("已还原")).length >= 2, "assistant output restore is notified");
 
   const assistantEnd = {
     message: {

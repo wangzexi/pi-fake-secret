@@ -41,6 +41,11 @@ export interface SecretMapping {
   fake: string;
 }
 
+interface SecretChange {
+  type: "mask" | "unmask";
+  secretType: string;
+}
+
 interface ExtensionAPI {
   on(name: string, handler: (event: any, ctx: any) => unknown | Promise<unknown>): void;
   registerCommand(
@@ -110,8 +115,12 @@ export class SecretStore {
    * Deduplicated: same real value always returns the same fake.
    */
   register(real: string): string {
+    return this.registerSecret(real).fake;
+  }
+
+  private registerSecret(real: string): { fake: string; isNew: boolean } {
     const existing = this.realToFake.get(real);
-    if (existing) return existing;
+    if (existing) return { fake: existing, isNew: false };
 
     const fake = this.generateFake(real);
     if (this.fakeToReal.has(fake) && this.fakeToReal.get(fake) !== real) {
@@ -119,7 +128,7 @@ export class SecretStore {
     }
     this.realToFake.set(real, fake);
     this.fakeToReal.set(fake, real);
-    return fake;
+    return { fake, isNew: true };
   }
 
   /**
@@ -139,7 +148,11 @@ export class SecretStore {
    * fake secrets. Longer matches are replaced first to avoid substring issues.
    */
   mask(text: string): string {
-    if (!text) return text;
+    return this.maskWithChanges(text).text;
+  }
+
+  maskWithChanges(text: string): { text: string; changes: SecretChange[] } {
+    if (!text) return { text, changes: [] };
 
     if (text.length > MAX_SCAN_SIZE) {
       return this.maskLargeText(text);
@@ -148,8 +161,9 @@ export class SecretStore {
     // First pass: collect all unique matches from the ORIGINAL text
     const matches = new Map<string, string>(); // real → fake
     const seen = new Set<string>();
+    const changes: SecretChange[] = [];
 
-    for (const { regex } of this.patterns) {
+    for (const { name, regex } of this.patterns) {
       regex.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = regex.exec(text)) !== null) {
@@ -159,12 +173,14 @@ export class SecretStore {
         if (this.fakeToReal.has(real)) continue;
         if (!seen.has(real) && real.length >= 8) {
           seen.add(real);
-          matches.set(real, this.register(real));
+          const { fake } = this.registerSecret(real);
+          matches.set(real, fake);
+          changes.push({ type: "mask", secretType: name });
         }
       }
     }
 
-    if (matches.size === 0) return text;
+    if (matches.size === 0) return { text, changes };
 
     // Second pass: apply replacements (longest first to avoid partial overlaps)
     const sorted = [...matches.entries()].sort((a, b) => b[0].length - a[0].length);
@@ -173,19 +189,20 @@ export class SecretStore {
       result = result.replaceAll(real, fake);
     }
 
-    return result;
+    return { text: result, changes };
   }
 
-  private maskLargeText(text: string): string {
+  private maskLargeText(text: string): { text: string; changes: SecretChange[] } {
     const matches = new Map<string, string>();
     const seen = new Set<string>();
+    const changes: SecretChange[] = [];
     const step = MAX_SCAN_SIZE - SCAN_OVERLAP;
 
     for (let start = 0; start < text.length; start += step) {
       const end = Math.min(text.length, start + MAX_SCAN_SIZE);
       const chunk = text.slice(start, end);
 
-      for (const { regex } of this.patterns) {
+      for (const { name, regex } of this.patterns) {
         regex.lastIndex = 0;
         let m: RegExpExecArray | null;
         while ((m = regex.exec(chunk)) !== null) {
@@ -193,7 +210,9 @@ export class SecretStore {
           if (this.fakeToReal.has(real)) continue;
           if (!seen.has(real) && real.length >= 8) {
             seen.add(real);
-            matches.set(real, this.register(real));
+            const { fake } = this.registerSecret(real);
+            matches.set(real, fake);
+            changes.push({ type: "mask", secretType: name });
           }
         }
       }
@@ -201,14 +220,14 @@ export class SecretStore {
       if (end === text.length) break;
     }
 
-    if (matches.size === 0) return text;
+    if (matches.size === 0) return { text, changes };
 
     let result = text;
     const sorted = [...matches.entries()].sort((a, b) => b[0].length - a[0].length);
     for (const [real, fake] of sorted) {
       result = result.replaceAll(real, fake);
     }
-    return result;
+    return { text: result, changes };
   }
 
   // ---------------------------------------------------------------------------
@@ -219,18 +238,24 @@ export class SecretStore {
    * Replace all known fake secrets in text with the original real values.
    */
   unmask(text: string): string {
-    if (!text || this.fakeToReal.size === 0) return text;
+    return this.unmaskWithChanges(text).text;
+  }
+
+  unmaskWithChanges(text: string): { text: string; changes: SecretChange[] } {
+    if (!text || this.fakeToReal.size === 0) return { text, changes: [] };
 
     let result = text;
+    const changes: SecretChange[] = [];
     // Longest fake first to avoid partial matches
     const sorted = [...this.fakeToReal.entries()]
       .sort((a, b) => b[0].length - a[0].length);
     for (const [fake, real] of sorted) {
       if (result.includes(fake)) {
         result = result.replaceAll(fake, real);
+        changes.push({ type: "unmask", secretType: this.getSecretType(real) });
       }
     }
-    return result;
+    return { text: result, changes };
   }
 
   // ---------------------------------------------------------------------------
@@ -257,6 +282,14 @@ export class SecretStore {
         real: this.hint(real),
         fake,
       }));
+  }
+
+  private getSecretType(real: string): string {
+    for (const { name, regex } of this.patterns) {
+      regex.lastIndex = 0;
+      if (regex.test(real)) return name;
+    }
+    return "secret";
   }
 
   // ---------------------------------------------------------------------------
@@ -422,32 +455,48 @@ function isToolCallEventType(toolName: string, event: { toolName?: string; name?
   return event.toolName === toolName || event.name === toolName || event.type === toolName;
 }
 
-function transformMessageInPlace(
+function transformMessageInPlaceWithChanges(
   message: Record<string, unknown>,
-  fn: (text: string) => string,
-): boolean {
+  fn: (text: string) => { text: string; changes: SecretChange[] },
+): SecretChange[] {
   const content = message.content;
-  let changed = false;
+  const changes: SecretChange[] = [];
 
   if (typeof content === "string") {
-    const newContent = fn(content);
-    if (newContent !== content) {
-      message.content = newContent;
-      changed = true;
+    const transformed = fn(content);
+    if (transformed.text !== content) {
+      message.content = transformed.text;
+      changes.push(...transformed.changes);
     }
   } else if (Array.isArray(content)) {
     for (const block of content) {
       if (isTextBlock(block)) {
-        const newText = fn(block.text);
-        if (newText !== block.text) {
-          block.text = newText;
-          changed = true;
+        const transformed = fn(block.text);
+        if (transformed.text !== block.text) {
+          block.text = transformed.text;
+          changes.push(...transformed.changes);
         }
       }
     }
   }
 
-  return changed;
+  return changes;
+}
+
+function notifySecurity(ctx: any, changes: SecretChange[], direction: "protected" | "restored"): void {
+  if (!ctx.hasUI || changes.length === 0) return;
+
+  const counts = new Map<string, number>();
+  for (const change of changes) {
+    counts.set(change.secretType, (counts.get(change.secretType) ?? 0) + 1);
+  }
+
+  const details = [...counts.entries()]
+    .map(([name, count]) => `${name} x${count}`)
+    .join(", ");
+  const verb = direction === "protected" ? "已保护" : "已还原";
+  const suffix = direction === "protected" ? "模型只会看到替身密钥。" : "用户侧显示真实内容。";
+  ctx.ui.notify(`pi-fake-secret: ${verb} ${changes.length} 个密钥（${details}）。${suffix}`, "info");
 }
 
 // =============================================================================
@@ -464,9 +513,10 @@ export default function (pi: ExtensionAPI): void {
   pi.on("input", async (event, ctx) => {
     if (!event.text) return { action: "continue" };
 
-    const masked = store.mask(event.text);
-    if (masked === event.text) return { action: "continue" };
-    return { action: "transform", text: masked };
+    const masked = store.maskWithChanges(event.text);
+    if (masked.text === event.text) return { action: "continue" };
+    notifySecurity(ctx, masked.changes, "protected");
+    return { action: "transform", text: masked.text };
   });
 
   // ---------------------------------------------------------------------------
@@ -477,14 +527,18 @@ export default function (pi: ExtensionAPI): void {
 
     if (isToolCallEventType("bash", event)) {
       if (typeof event.input?.command === "string") {
-        event.input.command = store.unmask(event.input.command);
+        const restored = store.unmaskWithChanges(event.input.command);
+        event.input.command = restored.text;
+        notifySecurity(ctx, restored.changes, "restored");
       }
       return {};
     }
 
     if (isToolCallEventType("write", event)) {
       if (typeof event.input?.content === "string") {
-        event.input.content = store.unmask(event.input.content);
+        const restored = store.unmaskWithChanges(event.input.content);
+        event.input.content = restored.text;
+        notifySecurity(ctx, restored.changes, "restored");
       }
       return {};
     }
@@ -493,7 +547,9 @@ export default function (pi: ExtensionAPI): void {
       if (Array.isArray(event.input?.edits)) {
         for (const edit of event.input.edits) {
           if (typeof edit.newText === "string") {
-            edit.newText = store.unmask(edit.newText);
+            const restored = store.unmaskWithChanges(edit.newText);
+            edit.newText = restored.text;
+            notifySecurity(ctx, restored.changes, "restored");
           }
         }
       }
@@ -509,8 +565,14 @@ export default function (pi: ExtensionAPI): void {
   pi.on("tool_result", async (event, ctx) => {
     if (!event.content || !Array.isArray(event.content)) return {};
 
-    const { blocks, changed } = transformTextBlocks(event.content, (text) => store.mask(text));
+    const changes: SecretChange[] = [];
+    const { blocks, changed } = transformTextBlocks(event.content, (text) => {
+      const masked = store.maskWithChanges(text);
+      changes.push(...masked.changes);
+      return masked.text;
+    });
     if (!changed) return {};
+    notifySecurity(ctx, changes, "protected");
     return { content: blocks };
   });
 
@@ -539,18 +601,19 @@ export default function (pi: ExtensionAPI): void {
   // Context is masked again by the context hook before the next model call, so
   // persisted visible messages can stay transparent to the user.
   // ---------------------------------------------------------------------------
-  const restoreAssistantMessage = (event: { message?: Record<string, unknown> }) => {
+  const restoreAssistantMessage = (event: { message?: Record<string, unknown> }, ctx: any) => {
     if (store.getStats().mappingCount === 0) return;
     if (!event.message || event.message.role !== "assistant") return;
-    transformMessageInPlace(event.message, (text) => store.unmask(text));
+    const changes = transformMessageInPlaceWithChanges(event.message, (text) => store.unmaskWithChanges(text));
+    notifySecurity(ctx, changes, "restored");
   };
 
-  pi.on("message_update", async (event) => {
-    restoreAssistantMessage(event);
+  pi.on("message_update", async (event, ctx) => {
+    restoreAssistantMessage(event, ctx);
   });
 
-  pi.on("message_end", async (event) => {
-    restoreAssistantMessage(event);
+  pi.on("message_end", async (event, ctx) => {
+    restoreAssistantMessage(event, ctx);
   });
 
   // ---------------------------------------------------------------------------
