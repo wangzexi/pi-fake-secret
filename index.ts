@@ -481,9 +481,10 @@ function notifySecurity(ctx: any, changes: SecretChange[], direction: "protected
   }
 
   const details = hints.join(", ");
-  const verb = direction === "protected" ? "已保护" : "已还原";
-  const suffix = direction === "protected" ? "模型只会看到替身虚拟密钥。" : "用户侧已显示真实内容。";
-  ctx.ui.notify(`pi-fake-secret: ${verb}密钥 ${details}，${suffix}`, "info");
+  const message = direction === "protected"
+    ? `🎭 模型将仅看到 ${details} 的替身。`
+    : `🎭 已还原真实密钥 ${details}。`;
+  ctx.ui.notify(message, "info");
 }
 
 // =============================================================================
