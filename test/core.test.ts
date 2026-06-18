@@ -48,6 +48,7 @@ const stripeKey = (mode: "live" | "test", body = "AbCdEfGhIjKlMnOp12345678901234
 const slackToken = () => ["xoxb", "1234567890", "abcdef"].join("-");
 const googleKey = () => "AI" + "za" + "a".repeat(35);
 const gitlabToken = () => "gl" + "pat-" + "a".repeat(20);
+const hint = (value: string) => value.slice(0, 4) + "*".repeat(Math.min(12, value.length - 8)) + value.slice(-4);
 
 class MockPi {
   handlers = new Map<string, (event: any, ctx: any) => Promise<any> | any>();
@@ -192,14 +193,14 @@ console.log("\nExtension hooks");
   assert(!inputResult.text.includes(real), "model input does not contain real secret");
   const fake = inputResult.text.match(/sk-proj-[a-zA-Z0-9-]+/)?.[0];
   assert(!!fake, "fake visible to model");
-  assert(pi.notifications.some((n) => n.includes("已保护")), "user is notified when secret is protected");
+  assert(pi.notifications.some((n) => n.includes(`已保护密钥 ${hint(real)}`)), "user is notified with masked real hint");
   assert(!pi.notifications.some((n) => n.includes(real)), "notification does not reveal real secret");
   assert(!pi.notifications.some((n) => n.includes(fake!)), "notification does not reveal fake secret");
 
   const bash = { toolName: "bash", input: { command: `echo ${fake}` } };
   await pi.emit("tool_call", bash);
   assertEqual(bash.input.command, `echo ${real}`, "bash command restores real secret");
-  assert(pi.notifications.some((n) => n.includes("已还原")), "user is notified when secret is restored");
+  assert(pi.notifications.some((n) => n.includes(`已还原密钥 ${hint(real)}`)), "user is notified when secret is restored");
 
   const write = { toolName: "write", input: { content: `TOKEN=${fake}` } };
   await pi.emit("tool_call", write);

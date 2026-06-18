@@ -44,6 +44,7 @@ export interface SecretMapping {
 interface SecretChange {
   type: "mask" | "unmask";
   secretType: string;
+  hint: string;
 }
 
 interface ExtensionAPI {
@@ -175,7 +176,7 @@ export class SecretStore {
           seen.add(real);
           const { fake } = this.registerSecret(real);
           matches.set(real, fake);
-          changes.push({ type: "mask", secretType: name });
+          changes.push({ type: "mask", secretType: name, hint: this.hint(real) });
         }
       }
     }
@@ -212,7 +213,7 @@ export class SecretStore {
             seen.add(real);
             const { fake } = this.registerSecret(real);
             matches.set(real, fake);
-            changes.push({ type: "mask", secretType: name });
+            changes.push({ type: "mask", secretType: name, hint: this.hint(real) });
           }
         }
       }
@@ -252,7 +253,7 @@ export class SecretStore {
     for (const [fake, real] of sorted) {
       if (result.includes(fake)) {
         result = result.replaceAll(fake, real);
-        changes.push({ type: "unmask", secretType: this.getSecretType(real) });
+        changes.push({ type: "unmask", secretType: this.getSecretType(real), hint: this.hint(real) });
       }
     }
     return { text: result, changes };
@@ -269,10 +270,10 @@ export class SecretStore {
     };
   }
 
-  /** Truncate a secret for display: first 4 + … + last 4 chars. */
+  /** Truncate a secret for display: first 4 + masked middle + last 4 chars. */
   private hint(real: string): string {
     return real.length > 8
-      ? real.slice(0, 4) + "…" + real.slice(-4)
+      ? real.slice(0, 4) + "*".repeat(Math.min(12, real.length - 8)) + real.slice(-4)
       : real;
   }
 
@@ -486,17 +487,19 @@ function transformMessageInPlaceWithChanges(
 function notifySecurity(ctx: any, changes: SecretChange[], direction: "protected" | "restored"): void {
   if (!ctx.hasUI || changes.length === 0) return;
 
-  const counts = new Map<string, number>();
+  const hints: string[] = [];
+  const seen = new Set<string>();
   for (const change of changes) {
-    counts.set(change.secretType, (counts.get(change.secretType) ?? 0) + 1);
+    if (!seen.has(change.hint)) {
+      seen.add(change.hint);
+      hints.push(change.hint);
+    }
   }
 
-  const details = [...counts.entries()]
-    .map(([name, count]) => `${name} x${count}`)
-    .join(", ");
+  const details = hints.join(", ");
   const verb = direction === "protected" ? "已保护" : "已还原";
-  const suffix = direction === "protected" ? "模型只会看到替身密钥。" : "用户侧显示真实内容。";
-  ctx.ui.notify(`pi-fake-secret: ${verb} ${changes.length} 个密钥（${details}）。${suffix}`, "info");
+  const suffix = direction === "protected" ? "模型只会看到替身虚拟密钥。" : "用户侧已显示真实内容。";
+  ctx.ui.notify(`pi-fake-secret: ${verb}密钥 ${details}，${suffix}`, "info");
 }
 
 // =============================================================================
