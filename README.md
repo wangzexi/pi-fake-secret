@@ -61,15 +61,6 @@ pi install /path/to/pi-fake-secret
 
 OpenAI、Anthropic、GitHub PAT、AWS、Stripe、Slack、JWT、PEM 私钥、Google API、GitLab、SendGrid 等常见密钥格式。
 
-## 开发
-
-```bash
-git clone https://github.com/wangzexi/pi-fake-secret
-cd pi-fake-secret
-npm test
-pi -e ./index.ts
-```
-
 ## License
 
 MIT
